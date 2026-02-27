@@ -1,0 +1,221 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: vortex44-postgres
+    environment:
+      POSTGRES_USER: vortex44
+      POSTGRES_PASSWORD: vortex44_secure_pass_2026
+      POSTGRES_DB: vortex44
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vortex44"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: vortex44-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO for S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    container_name: vortex44-minio
+    environment:
+      MINIO_ROOT_USER: vortex44
+      MINIO_ROOT_PASSWORD: vortex44_minio_pass_2026
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Traefik for reverse proxy and SSL
+  traefik:
+    image: traefik:v3.0
+    container_name: vortex44-traefik
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - traefik_certs:/etc/traefik/certs
+    environment:
+      - TZ=UTC
+    depends_on:
+      - postgres
+      - redis
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vortex44-backend
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://vortex44:vortex44_secure_pass_2026@postgres:5432/vortex44
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=vortex44_jwt_secret_2026_change_in_prod
+      - MINIO_ENDPOINT=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=vortex44
+      - MINIO_SECRET_KEY=vortex44_minio_pass_2026
+      - AI_API_KEY=${AI_API_KEY:-}
+      - CORE_AI_URL=http://core-ai:3003
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      core-ai:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vortex44-backend.rule=Host(`api.vortex44.local`)"
+      - "traefik.http.routers.vortex44-backend.entrypoints=websecure"
+      - "traefik.http.routers.vortex44-backend.tls=true"
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vortex44-frontend
+    environment:
+      - VITE_API_URL=http://backend:3000
+      - VITE_WS_URL=ws://backend:3000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vortex44-frontend.rule=Host(`app.vortex44.local`)"
+      - "traefik.http.routers.vortex44-frontend.entrypoints=websecure"
+      - "traefik.http.routers.vortex44-frontend.tls=true"
+
+  # AI Engine
+  ai-engine:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    container_name: vortex44-ai-engine
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://vortex44:vortex44_secure_pass_2026@postgres:5432/vortex44
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://localhost:11434}
+    ports:
+      - "3001:3001"
+    depends_on:
+      - redis
+      - postgres
+
+  # Core AI (Main AI Service)
+  core-ai:
+    build:
+      context: ./core-ai
+      dockerfile: Dockerfile
+    container_name: vortex44-core-ai
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://vortex44:vortex44_secure_pass_2026@postgres:5432/vortex44
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - BACKEND_URL=http://backend:3000
+      - DEPLOYER_URL=http://deployer:3002
+    ports:
+      - "3003:3003"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # Deployer Service
+  deployer:
+    build:
+      context: ./deployer
+      dockerfile: Dockerfile
+    container_name: vortex44-deployer
+    environment:
+      - NODE_ENV=production
+      - DOCKER_HOST=tcp://docker-in-docker:2375
+      - DATABASE_URL=postgresql://vortex44:vortex44_secure_pass_2026@postgres:5432/vortex44
+      - REDIS_URL=redis://redis:6379
+      - MINIO_ENDPOINT=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=vortex44
+      - MINIO_SECRET_KEY=vortex44_minio_pass_2026
+    ports:
+      - "3002:3002"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    privileged: true
+
+  # Docker-in-Docker for build isolation
+  docker-in-docker:
+    image: docker:dind
+    container_name: vortex44-dind
+    privileged: true
+    volumes:
+      - dind_data:/var/lib/docker
+    environment:
+      - DOCKER_TLS_CERT_DIR=
+    ports:
+      - "2375:2375"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  traefik_certs:
+  dind_data:
+
+networks:
+  default:
+    name: vortex44-network
