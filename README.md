@@ -49,6 +49,10 @@ Vortex44 is an AI-first platform that generates complete, production-ready web a
 
 ### Quick Start (Development)
 
+```bash
+esse site foi criado pelo OpenCode
+```
+
 1. Clone the repository:
 ```bash
 git clone https://github.com/vortex44/vortex44.git
