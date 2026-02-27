@@ -49,6 +49,8 @@ Vortex44 is an AI-first platform that generates complete, production-ready web a
 
 ### Quick Start (Development)
 
+Como Esse site foi criado
+
 ```bash
 esse site foi criado pelo OpenCode
 ```
